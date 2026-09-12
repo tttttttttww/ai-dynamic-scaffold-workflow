@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>管理后台 - AI 动态学习支架</title>
+  <style>
+    :root{--bg:#f6f8fb;--card:#fff;--text:#18212f;--muted:#667085;--line:#e6eaf0;--primary:#3568e8}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+    button,input{font:inherit}
+    header{height:64px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;z-index:5}
+    .wrap{max-width:1150px;margin:26px auto;padding:0 18px 50px}
+    .tools{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 18px}
+    input{border:1px solid #d8dee8;border-radius:9px;padding:10px 12px;min-width:210px}
+    button{border:1px solid var(--line);background:#fff;border-radius:9px;padding:9px 13px;cursor:pointer}
+    .primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+    .list{display:grid;gap:12px}
+    .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:17px}
+    .head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+    .sid{font-weight:800}
+    .meta{color:var(--muted);font-size:13px}
+    .msg{margin-top:12px;line-height:1.65;white-space:pre-wrap}
+    .label{color:var(--muted);font-size:13px;margin-bottom:4px}
+    .answer{background:#f7f9fc;border-radius:10px;padding:12px;margin-top:10px}
+    .empty{color:var(--muted);text-align:center;padding:50px}
+  </style>
+</head>
+<body>
+<header>
+  <strong>AI 动态学习支架 · 管理后台</strong>
+  <button id="logout">退出登录</button>
+</header>
+
+<main class="wrap">
+  <div class="tools">
+    <input id="filter" placeholder="按学生编号筛选，例如 S01" />
+    <button id="refresh">刷新</button>
+    <button id="export" class="primary">导出 CSV</button>
+  </div>
+  <div id="list" class="list"></div>
+</main>
+
+<script>
+const token = sessionStorage.getItem("ai_scaffold_admin_token");
+if (!token) location.href = "/";
+
+const list = document.getElementById("list");
+const filter = document.getElementById("filter");
+
+function authHeaders(extra={}) {
+  return {...extra, Authorization:"Bearer " + token};
+}
+function esc(s="") {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
+}
+function fmtTime(v) {
+  try { return new Date(v).toLocaleString("zh-CN"); } catch { return v || ""; }
+}
+
+async function loadLogs() {
+  list.innerHTML = '<div class="empty">正在加载……</div>';
+  const q = filter.value.trim();
+  const res = await fetch("/api/admin/logs" + (q ? "?studentId=" + encodeURIComponent(q) : ""), {
+    headers: authHeaders()
+  });
+  if (res.status === 401) {
+    sessionStorage.removeItem("ai_scaffold_admin_token");
+    location.href = "/";
+    return;
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    list.innerHTML = '<div class="empty">加载失败：' + esc(data.error || "未知错误") + '</div>';
+    return;
+  }
+  if (!data.logs.length) {
+    list.innerHTML = '<div class="empty">暂无日志</div>';
+    return;
+  }
+
+  list.innerHTML = data.logs.map((x, i) => `
+    <article class="card">
+      <div class="head">
+        <div>
+          <span class="sid">${esc(x.studentId)}</span>
+          ${x.level ? `<span class="meta"> · Level ${esc(x.level)}</span>` : ""}
+        </div>
+        <div class="meta">${esc(fmtTime(x.timestamp))}</div>
+      </div>
+      <div class="meta">workflow: ${esc(x.workflowId || "")} ${x.workflowExecuteId ? `· execute: ${esc(x.workflowExecuteId)}` : ""}</div>
+      <div class="msg">
+        <div class="label">学生输入</div>
+        ${esc(x.message || "(仅上传截图)")}
+      </div>
+      <div class="answer">
+        <div class="label">AI 回复</div>
+        ${esc(x.assistantMessage || "")}
+      </div>
+      ${x.imageKey ? `<div style="margin-top:12px"><button data-image="${esc(x.imageKey)}">查看截图</button></div>` : ""}
+    </article>
+  `).join("");
+
+  document.querySelectorAll("[data-image]").forEach(btn => {
+    btn.onclick = async () => {
+      const key = btn.getAttribute("data-image");
+      const r = await fetch("/api/admin/image?key=" + encodeURIComponent(key), {headers:authHeaders()});
+      if (!r.ok) return alert("图片读取失败");
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    };
+  });
+}
+
+document.getElementById("refresh").onclick = loadLogs;
+filter.addEventListener("keydown", e => { if (e.key === "Enter") loadLogs(); });
+document.getElementById("logout").onclick = () => {
+  sessionStorage.removeItem("ai_scaffold_admin_token");
+  location.href = "/";
+};
+document.getElementById("export").onclick = async () => {
+  const res = await fetch("/api/admin/export", {headers:authHeaders()});
+  if (!res.ok) return alert("导出失败");
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "ai-dynamic-scaffold-logs.csv";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+
+loadLogs();
+</script>
+</body>
+</html>

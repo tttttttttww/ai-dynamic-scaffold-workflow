@@ -1,0 +1,15 @@
+{
+  "name": "ai-dynamic-scaffold",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "edgeone makers dev"
+  },
+  "dependencies": {
+    "@edgeone/pages-blob": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "multer": "latest"
+  }
+}

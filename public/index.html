@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI 动态学习支架</title>
+  <style>
+    :root {
+      --bg:#f5f7fb; --card:#fff; --text:#1d2939; --muted:#667085;
+      --line:#e5eaf2; --primary:#4f6ef7; --primary-dark:#3c59d3;
+      --soft-blue:#edf2ff; --shadow:0 12px 34px rgba(38,58,105,.07);
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px}
+    button,input,textarea{font:inherit}
+    button{cursor:pointer}
+    .topbar{height:72px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(22px,calc((100% - 1040px)/2));position:sticky;top:0;z-index:10}
+    .brand{font-size:18px;font-weight:750;letter-spacing:.02em}
+    .tagline{margin-top:3px;color:var(--muted);font-size:12px}
+    .admin-link{min-height:40px;border:0;background:transparent;border-radius:9px;color:var(--muted);padding:8px 12px}
+    .admin-link:hover{background:var(--soft-blue);color:var(--primary-dark)}
+    .wrap{max-width:900px;margin:0 auto;padding:42px 20px 70px}
+    .hero{margin-bottom:22px}
+    .hero h1{margin:0 0 9px;font-size:30px;letter-spacing:-.02em}
+    .hero p{margin:0;max-width:650px;color:var(--muted);line-height:1.7}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);padding:28px}
+    .start-card{max-width:780px}
+    .section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+    .section-title h2{margin:0;font-size:18px}
+    .field{margin-top:22px}
+    label{display:block;font-weight:700;margin-bottom:9px}
+    .optional{font-size:13px;font-weight:500;color:var(--muted);margin-left:5px}
+    input[type=text],input[type=password],textarea{width:100%;border:1px solid #d8dfeb;border-radius:11px;padding:12px 13px;outline:none;background:#fff;color:var(--text)}
+    input[type=text]{max-width:250px}
+    input:focus,textarea:focus{border-color:#8ea6fa;box-shadow:0 0 0 4px rgba(79,110,247,.11)}
+    textarea{min-height:88px;resize:vertical;line-height:1.6}
+    .hint{font-size:13px;color:var(--muted);line-height:1.6;margin-top:7px}
+    .upload-zone{display:flex;min-height:150px;align-items:center;justify-content:center;text-align:center;border:1.5px dashed #b9c5da;border-radius:15px;background:#f8faff;padding:22px;transition:.18s ease}
+    .upload-zone:hover,.upload-zone.dragover{border-color:var(--primary);background:#f1f5ff}
+    .upload-zone strong{display:block;color:#344054;font-size:16px;margin-bottom:5px}
+    .upload-zone span{color:var(--muted);font-size:13px}
+    .upload-zone input{display:none}
+    .upload-mark{font-size:25px;color:var(--primary);line-height:1;margin-bottom:9px}
+    .file-preview{display:none;align-items:center;gap:12px;margin-top:12px;padding:9px 11px;background:#f7f9fc;border-radius:12px;max-width:440px}
+    .file-preview img{width:76px;height:58px;object-fit:cover;border-radius:8px}
+    .file-info{min-width:0;flex:1;text-align:left}
+    .file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+    .file-action{border:0;background:transparent;color:var(--muted);font-size:19px;padding:8px}
+    .file-action:hover{color:#b42318}
+    .actions{display:flex;justify-content:flex-end;margin-top:24px}
+    .primary{min-height:48px;border:0;border-radius:11px;background:var(--primary);color:#fff;padding:11px 23px;font-weight:700;transition:.18s ease}
+    .primary:hover{background:var(--primary-dark);transform:translateY(-1px)}
+    .primary:disabled{opacity:.55;cursor:not-allowed;transform:none}
+    .chat-shell{display:none}
+    .student-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:17px;padding:13px 16px;background:#fff;border:1px solid var(--line);border-radius:13px}
+    .student-strip strong{font-size:15px}
+    .student-strip span{color:var(--muted);font-size:14px;margin-left:7px}
+    .change-id{border:0;background:transparent;color:var(--primary-dark);padding:8px 4px;font-size:14px}
+    .change-id:hover{text-decoration:underline}
+    .chat-card{padding:24px 22px 18px}
+    .chat{display:flex;flex-direction:column;gap:19px;min-height:180px}
+    .message-row{display:flex;flex-direction:column;max-width:82%;gap:5px}
+    .message-row.user{align-self:flex-end;align-items:flex-end}
+    .message-row.assistant{align-self:flex-start;align-items:flex-start}
+    .message-label{font-size:12px;color:var(--muted);padding:0 4px}
+    .ai-label{display:flex;align-items:center;gap:7px}
+    .ai-mark{display:inline-flex;align-items:center;justify-content:center;width:23px;height:23px;border-radius:50%;background:var(--primary);color:#fff;font-size:11px;font-weight:700}
+    .bubble{padding:13px 16px;border-radius:16px;line-height:1.72;white-space:pre-wrap;word-break:break-word}
+    .message-row.user .bubble{background:#e9efff}
+    .message-row.assistant .bubble{background:#fff;border:1px solid var(--line);box-shadow:0 3px 12px rgba(38,58,105,.035)}
+    .bubble-image{display:block;max-width:min(320px,100%);max-height:270px;object-fit:contain;border-radius:10px;margin-bottom:9px;cursor:zoom-in}
+    .bubble-image:last-child{margin-bottom:0}
+    .thinking{display:flex;align-items:center;gap:8px;padding:10px 4px;color:var(--muted);font-size:14px}
+    .dots{display:flex;gap:3px}
+    .dots i{width:5px;height:5px;border-radius:50%;background:#9aa9cf;animation:bounce 1.1s infinite}
+    .dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
+    @keyframes bounce{0%,70%,100%{transform:translateY(0)}35%{transform:translateY(-4px)}}
+    .composer{margin-top:23px;border:1px solid #dce3ef;border-radius:14px;background:#fff;padding:9px;box-shadow:0 5px 18px rgba(38,58,105,.04)}
+    .pending-preview{display:none;align-items:center;gap:9px;padding:2px 4px 9px}
+    .pending-preview img{width:56px;height:43px;object-fit:cover;border-radius:7px}
+    .pending-preview span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:13px}
+    .composer-row{display:flex;align-items:flex-end;gap:8px}
+    .attach-btn{width:44px;height:44px;border:0;border-radius:10px;background:#f2f5fb;color:var(--primary-dark);font-size:25px;line-height:1}
+    .attach-btn:hover{background:var(--soft-blue)}
+    .composer textarea{min-height:44px;max-height:130px;flex:1;border:0;padding:11px 8px;resize:none;box-shadow:none}
+    .composer .send{min-height:44px;padding:9px 17px}
+    .status{min-height:22px;text-align:center;color:var(--muted);font-size:13px;margin-top:12px}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.34);display:none;align-items:center;justify-content:center;z-index:20;padding:18px}
+    .modal{width:min(390px,100%);background:#fff;border-radius:17px;padding:24px;box-shadow:0 24px 70px rgba(0,0,0,.2)}
+    .modal h2{margin:0 0 8px;font-size:20px}.modal p{color:var(--muted);font-size:14px;margin:0 0 17px}
+    .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:17px}
+    .secondary{min-height:44px;border:1px solid var(--line);background:#fff;border-radius:10px;padding:9px 16px}
+    .secondary:hover{background:#f8f9fc}
+    .error{color:#b42318;font-size:13px;margin-top:8px;min-height:18px}
+    @media(max-width:650px){
+      .topbar{height:66px;padding:0 15px}.brand{font-size:16px}.tagline{display:none}
+      .wrap{padding:28px 14px 45px}.hero h1{font-size:25px}.card{padding:20px;border-radius:17px}
+      .start-card{padding:20px}.student-strip{align-items:flex-start}.student-strip span{display:block;margin:3px 0 0}
+      .chat-card{padding:20px 11px 13px}.message-row{max-width:94%}.composer-row{gap:5px}.composer .send{padding:9px 13px}
+    }
+    @media(max-width:430px){.student-strip{flex-direction:column}.actions .primary{width:100%}.bubble-image{max-width:100%}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div><div class="brand">AI 动态学习支架</div><div class="tagline">根据你的程序和思考过程，提供适合的学习提示</div></div>
+    <button id="adminBtn" class="admin-link">管理员登录</button>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>编程学习小助手</h1>
+      <p>上传你的程序截图，小助手会根据你现在的完成情况，一步一步陪你检查和修改。</p>
+    </section>
+
+    <section id="startCard" class="card start-card">
+      <div class="section-title"><h2>开始一次学习对话</h2></div>
+      <div class="field" style="margin-top:16px">
+        <label for="studentId">学习编号</label>
+        <input id="studentId" type="text" placeholder="例如 S01" maxlength="30" autocomplete="off" />
+        <div class="hint">填写老师提供的编号，无需注册账号。</div>
+      </div>
+      <div class="field">
+        <label>上传当前程序截图</label>
+        <div id="initialUpload" class="upload-zone">
+          <input id="initialImage" type="file" accept="image/png,image/jpeg,image/webp" />
+          <div><div class="upload-mark">＋</div><strong>上传程序截图</strong><span>点击选择 JPG / PNG / WEBP，单张不超过 5MB</span></div>
+        </div>
+        <div id="initialPreview" class="file-preview"><img alt="程序截图预览" /><div class="file-info"><div class="file-name"></div><div class="hint">准备发送</div></div><button class="file-action" type="button" aria-label="删除图片">×</button></div>
+      </div>
+      <div class="field">
+        <label for="initialMessage">还有什么想告诉小助手的吗？<span class="optional">（可选）</span></label>
+        <textarea id="initialMessage" placeholder="例如：我不知道这里为什么运行不起来。"></textarea>
+      </div>
+      <div class="actions"><button id="startBtn" class="primary">开始检查程序</button></div>
+    </section>
+
+    <section id="chatShell" class="chat-shell">
+      <div class="student-strip"><div><strong id="activeStudent"></strong><span>当前学习对话</span></div><button id="changeId" class="change-id">更换编号</button></div>
+      <section class="card chat-card">
+        <div id="chat" class="chat"></div>
+        <div id="status" class="status"></div>
+        <div class="composer">
+          <div id="pendingPreview" class="pending-preview"><img alt="待发送图片预览" /><span></span><button id="removePending" class="file-action" type="button" aria-label="取消待发送图片">×</button></div>
+          <div class="composer-row">
+            <button id="attachBtn" class="attach-btn" type="button" aria-label="上传图片">+</button>
+            <input id="chatImage" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+            <textarea id="chatMessage" rows="1" placeholder="回答小助手……"></textarea>
+            <button id="sendBtn" class="primary send" type="button">发送</button>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="modal" class="modal-backdrop">
+    <div class="modal">
+      <h2>管理员登录</h2><p>仅教师或研究人员使用。</p>
+      <input id="adminPassword" type="password" placeholder="管理员密码" />
+      <div id="loginError" class="error"></div>
+      <div class="modal-actions"><button id="cancelLogin" class="secondary">取消</button><button id="confirmLogin" class="primary">进入后台</button></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const state = { studentId:"", initialFile:null, pendingFile:null, sending:false };
+    const historyKey = sid => "ai_scaffold_chat_" + sid;
+
+    function clearPreview(container, input) {
+      input.value = "";
+      container.style.display = "none";
+      container.querySelector("img").removeAttribute("src");
+      container.querySelector(".file-name, span").textContent = "";
+    }
+    function showPreview(container, file) {
+      container.querySelector("img").src = URL.createObjectURL(file);
+      const name = container.querySelector(".file-name, span");
+      if (name) name.textContent = file.name;
+      container.style.display = "flex";
+    }
+    function validateFile(file) {
+      if (!file) return false;
+      if (file.size > 5 * 1024 * 1024) { alert("图片不能超过 5MB"); return false; }
+      return true;
+    }
+    function saveHistory() {
+      try { localStorage.setItem(historyKey(state.studentId), JSON.stringify([...$("chat").children].map(row => ({ role:row.dataset.role, text:row.dataset.text, imageName:row.dataset.imageName || "" })))); }
+      catch (err) { console.warn("聊天记录保存失败", err); }
+    }
+    function addMessage(text, role, fileName="", imageUrl="") {
+      const row = document.createElement("div");
+      row.className = "message-row " + role;
+      row.dataset.role = role; row.dataset.text = text; row.dataset.imageName = fileName;
+      const label = document.createElement("div");
+      label.className = "message-label";
+      label.innerHTML = role === "assistant" ? '<span class="ai-label"><span class="ai-mark">AI</span>小助手</span>' : "学生";
+      const bubble = document.createElement("div"); bubble.className = "bubble";
+      if (imageUrl) { const img = document.createElement("img"); img.className = "bubble-image"; img.src = imageUrl; img.alt = fileName || "学生上传的程序截图"; img.onclick = () => window.open(imageUrl, "_blank"); bubble.appendChild(img); }
+      if (text) { const copy = document.createElement("span"); copy.textContent = text; bubble.appendChild(copy); }
+      row.append(label, bubble); $("chat").appendChild(row); row.scrollIntoView({behavior:"smooth", block:"end"}); saveHistory();
+    }
+    function restoreHistory(sid) {
+      $("chat").replaceChildren();
+      try {
+        const entries = JSON.parse(localStorage.getItem(historyKey(sid)) || "[]");
+        entries.forEach(item => addMessage(item.text || "", item.role, item.imageName));
+      } catch (err) { console.warn("聊天记录读取失败", err); }
+    }
+    function enterChat(sid) {
+      state.studentId = sid;
+      localStorage.setItem("ai_scaffold_student_id", sid);
+      $("activeStudent").textContent = sid; $("startCard").style.display = "none"; $("chatShell").style.display = "block";
+      restoreHistory(sid);
+    }
+    function resetToStart() {
+      state.studentId = ""; state.initialFile = null; state.pendingFile = null;
+      $("chatShell").style.display = "none"; $("startCard").style.display = "block"; $("studentId").value = "";
+      clearPreview($("initialPreview"), $("initialImage")); clearPreview($("pendingPreview"), $("chatImage"));
+      $("initialMessage").value = ""; $("chatMessage").value = ""; $("studentId").focus();
+    }
+    function setThinking(show) {
+      const old = $("thinking"); if (old) old.remove();
+      if (!show) return;
+      const row = document.createElement("div"); row.id = "thinking"; row.className = "thinking";
+      row.innerHTML = "小助手正在思考 <span class=\"dots\"><i></i><i></i><i></i></span>";
+      $("chat").appendChild(row); row.scrollIntoView({behavior:"smooth", block:"end"});
+    }
+    async function sendTurn(text, file, firstTurn=false) {
+      if (state.sending) return;
+      if (!state.studentId) { alert("请先填写学习编号。"); return; }
+      if (firstTurn && !file) { alert("请先上传当前程序截图，再开始检查。"); return; }
+      if (!file && !text) { alert("请输入想回答的话，或上传新的程序截图。"); return; }
+      state.sending = true; $("sendBtn").disabled = true; $("startBtn").disabled = true; setThinking(true);
+      const imageUrl = file ? URL.createObjectURL(file) : "";
+      addMessage(text || "已上传程序截图", "user", file?.name || "", imageUrl);
+      const fd = new FormData(); fd.append("studentId", state.studentId); fd.append("message", text);
+      if (file) fd.append("image", file);
+      try {
+        const res = await fetch("/api/chat", {method:"POST", body:fd});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "请求失败");
+        addMessage(data.assistantMessage || "小助手暂时没有回复成功，请稍后再试一次。", "assistant");
+        $("initialMessage").value = ""; $("chatMessage").value = "";
+        if (firstTurn) { clearPreview($("initialPreview"), $("initialImage")); state.initialFile = null; }
+        else { clearPreview($("pendingPreview"), $("chatImage")); state.pendingFile = null; }
+      } catch (err) {
+        console.error(err); addMessage("小助手暂时没有回复成功，请稍后再试一次。", "assistant");
+      } finally { setThinking(false); state.sending = false; $("sendBtn").disabled = false; $("startBtn").disabled = false; }
+    }
+    $("studentId").value = localStorage.getItem("ai_scaffold_student_id") || "";
+    $("initialUpload").onclick = e => { if (e.target !== $("initialImage")) $("initialImage").click(); };
+    $("initialImage").onchange = () => { const file=$("initialImage").files[0]; if (!validateFile(file)) return clearPreview($("initialPreview"), $("initialImage")); state.initialFile=file; showPreview($("initialPreview"),file); };
+    $("initialPreview").querySelector(".file-action").onclick = () => { state.initialFile=null; clearPreview($("initialPreview"),$("initialImage")); };
+    $("startBtn").onclick = () => { const sid=$("studentId").value.trim(); if (!sid) return alert("请先填写学习编号。"); localStorage.setItem("ai_scaffold_student_id",sid); enterChat(sid); sendTurn($("initialMessage").value.trim(),state.initialFile,true); };
+    $("attachBtn").onclick = () => $("chatImage").click();
+    $("chatImage").onchange = () => { const file=$("chatImage").files[0]; if (!validateFile(file)) return clearPreview($("pendingPreview"),$("chatImage")); state.pendingFile=file; showPreview($("pendingPreview"),file); };
+    $("removePending").onclick = () => { state.pendingFile=null; clearPreview($("pendingPreview"),$("chatImage")); };
+    $("sendBtn").onclick = () => sendTurn($("chatMessage").value.trim(),state.pendingFile);
+    $("chatMessage").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("sendBtn").click(); } });
+    $("changeId").onclick = resetToStart;
+
+    const modal = $("modal");
+    $("adminBtn").onclick = () => { $("adminPassword").value=""; $("loginError").textContent=""; modal.style.display="flex"; setTimeout(()=>$("adminPassword").focus(),50); };
+    $("cancelLogin").onclick = () => modal.style.display="none";
+    modal.onclick = e => { if (e.target === modal) modal.style.display="none"; };
+    async function doAdminLogin() {
+      const password=$("adminPassword").value; $("loginError").textContent="";
+      if (!password) return $("loginError").textContent="请输入密码。";
+      try {
+        const res=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});
+        const data=await res.json(); if (!res.ok) throw new Error(data.error || "登录失败");
+        sessionStorage.setItem("ai_scaffold_admin_token",data.token); location.href="/admin.html";
+      } catch (err) { $("loginError").textContent=err.message; }
+    }
+    $("confirmLogin").onclick=doAdminLogin;
+    $("adminPassword").addEventListener("keydown",e=>{if(e.key==="Enter")doAdminLogin();});
+  </script>
+</body>
+</html>
