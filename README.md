@@ -1,48 +1,65 @@
-# AI 动态学习支架（Coze Workflow 版）
+# AI Dynamic Scaffold · Bot API 版
 
-这一版已经从旧的 **Bot Chat API (`/v3/chat`)** 改为 **Workflow API (`/v1/workflow/run`)**。
+这是当前建议部署版本：网页只调用 Coze 智能体（Bot），Bot 内部继续运行已配置好的对话流/工作流。
 
-## Coze 授权（最小权限）
+## 功能
 
-给腾讯云后端使用的服务身份凭证，只需要授权：
-
-1. **工作流 → run**（运行已发布工作流）
-2. **文件 → uploadFile**（把学生截图上传到 Coze）
-
-资源范围只选“当前工作流所在空间”即可。知识库检索发生在工作流内部，不需要网站另外调用知识库 OpenAPI。
+- 学生匿名编号（如 S01）
+- 第一轮上传程序截图 + 文字，可继续多轮文字对话
+- 图片先上传 Coze，再通过 `/v3/chat` 发送给 Bot
+- 同一学生、同一 `EXPERIMENT_RUN_ID` 自动续接同一 conversation
+- EdgeOne Blob 持久保存截图、会话上下文和交互日志
+- 管理后台查看日志、查看截图、导出 CSV
+- `/api/health` 可检查 Bot 与 Token 是否配置
+- 测试时访问首页加 `?debug=1`，前端会显示真实后端错误；正式给学生的网址不要加这个参数
 
 ## 腾讯云环境变量
 
-复制 `.env.example` 中的变量。必填：
+必须配置：
 
-- `COZE_ACCESS_TOKEN`
-- `COZE_WORKFLOW_ID`
-- `COZE_WORKFLOW_TEXT_PARAM`（默认 `student_answer`）
-- `COZE_WORKFLOW_IMAGE_PARAM`（默认 `program_image`）
-- `COZE_WORKFLOW_OUTPUT_PARAM`（默认 `final_feedback`）
-- `ADMIN_PASSWORD`
-- `ADMIN_SESSION_SECRET`
+```text
+COZE_ACCESS_TOKEN=你的 Coze 服务身份凭证
+COZE_BOT_ID=7652241106834472996
+ADMIN_PASSWORD=你自己设置的管理员密码
+ADMIN_SESSION_SECRET=至少 32 位随机字符串
+EXPERIMENT_RUN_ID=pilot01
+```
 
-如果工作流属于“扣子应用”，再填 `COZE_APP_ID`；如果 Coze 试运行明确要求关联智能体，再填 `COZE_WORKFLOW_BOT_ID`。
+### Coze 服务身份权限
 
-## 图片与多轮交互
+至少需要：
 
-学生第一次必须上传程序截图。后端会：
+- `chat`：调用 `/v3/chat`
+- `uploadFile`：上传学生截图
 
-1. 保存截图到 EdgeOne Blob；
-2. 上传到 Coze，得到 `file_id`；
-3. 运行工作流；
-4. 后续学生只输入文字时，自动复用该学生最近一次截图的 `file_id`；
-5. 学生重新上传截图时，用新截图替换上下文。
+Bot 及其内部使用的对话流/工作流需要已经发布，并且此凭证对 Bot 所在空间有访问权限。
 
-因此不再使用旧 Bot 的 `conversation_id` / `chat_id`。
+## EdgeOne 构建设置
 
-## 工作流输入输出
+```text
+框架预设：Other
+根目录：./
+输出目录：public
+构建命令：留空
+安装命令：npm install
+生产分支：main
+```
 
-默认按截图中的工作流：
+## 重要：实验批次
 
-- Image 输入：`program_image`
-- 文本输入：`student_answer`
-- 结束节点文本输出：`final_feedback`
+每次新的预实验或正式实验建议修改：
 
-若你实际部署的是另一个外层工作流，在腾讯云修改这三个参数名即可，无需改代码。
+```text
+EXPERIMENT_RUN_ID=pilot02
+```
+
+服务器会按批次隔离学生的 conversation，避免 S01 在新一轮实验中接着上一轮的聊天记录。
+
+## 路径
+
+- `/` 学生端
+- `/admin.html` 管理后台
+- `/api/chat` Bot 对话接口
+- `/api/admin/logs` 日志
+- `/api/admin/export` CSV
+- `/api/health` 健康检查

@@ -165,6 +165,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const state = { studentId:"", initialFile:null, pendingFile:null, sending:false };
+    const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
     const historyKey = sid => "ai_scaffold_chat_" + sid;
 
     function clearPreview(container, input) {
@@ -245,7 +246,7 @@
         if (firstTurn) { clearPreview($("initialPreview"), $("initialImage")); state.initialFile = null; }
         else { clearPreview($("pendingPreview"), $("chatImage")); state.pendingFile = null; }
       } catch (err) {
-        console.error(err); addMessage("小助手暂时没有回复成功，请稍后再试一次。", "assistant");
+        console.error(err); addMessage(DEBUG_MODE ? ("调试错误：" + err.message) : "小助手暂时没有回复成功，请稍后再试一次。", "assistant");
       } finally { setThinking(false); state.sending = false; $("sendBtn").disabled = false; $("startBtn").disabled = false; }
     }
     $("studentId").value = localStorage.getItem("ai_scaffold_student_id") || "";

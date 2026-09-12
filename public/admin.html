@@ -88,7 +88,7 @@ async function loadLogs() {
         </div>
         <div class="meta">${esc(fmtTime(x.timestamp))}</div>
       </div>
-      <div class="meta">workflow: ${esc(x.workflowId || "")} ${x.workflowExecuteId ? `· execute: ${esc(x.workflowExecuteId)}` : ""}</div>
+      <div class="meta">bot: ${esc(x.botId || "")} ${x.conversationId ? `· conversation: ${esc(x.conversationId)}` : ""} ${x.chatId ? `· chat: ${esc(x.chatId)}` : ""}</div>
       <div class="msg">
         <div class="label">学生输入</div>
         ${esc(x.message || "(仅上传截图)")}

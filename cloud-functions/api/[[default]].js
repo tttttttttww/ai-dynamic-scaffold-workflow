@@ -20,22 +20,22 @@ const store = getStore({ name: "ai-dynamic-scaffold-data", consistency: "strong"
 
 const COZE_BASE = "https://api.coze.cn";
 const TOKEN = process.env.COZE_ACCESS_TOKEN;
-const WORKFLOW_ID = process.env.COZE_WORKFLOW_ID;
-const WORKFLOW_TEXT_PARAM = process.env.COZE_WORKFLOW_TEXT_PARAM || "student_answer";
-const WORKFLOW_IMAGE_PARAM = process.env.COZE_WORKFLOW_IMAGE_PARAM || "program_image";
-const WORKFLOW_OUTPUT_PARAM = process.env.COZE_WORKFLOW_OUTPUT_PARAM || "final_feedback";
-const WORKFLOW_APP_ID = process.env.COZE_APP_ID || "";
-const WORKFLOW_BOT_ID = process.env.COZE_WORKFLOW_BOT_ID || "";
+const BOT_ID = process.env.COZE_BOT_ID;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ADMIN_SECRET = process.env.ADMIN_SESSION_SECRET;
 const RUN_ID = process.env.EXPERIMENT_RUN_ID || "default";
 
+function safeId(v) {
+  return String(v || "").trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
+}
+const SAFE_RUN_ID = safeId(RUN_ID) || "default";
+
 function ensureConfig() {
   if (!TOKEN) throw new Error("COZE_ACCESS_TOKEN 未配置");
-  if (!WORKFLOW_ID) throw new Error("COZE_WORKFLOW_ID 未配置");
+  if (!BOT_ID) throw new Error("COZE_BOT_ID 未配置");
 }
-function safeId(v) {
-  return String(v || "").trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 30);
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 function jsonError(res, status, message) {
   return res.status(status).json({ error: message });
@@ -59,9 +59,12 @@ async function cozeFetch(url, options = {}) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
   if (!res.ok || (typeof data.code === "number" && data.code !== 0)) {
-    const logid = data?.detail?.logid ? ` [logid: ${data.detail.logid}]` : "";
-    throw new Error((data.msg || data.message || `Coze 请求失败 (${res.status})`) + logid);
+    const logid = data?.detail?.logid || data?.logid || "";
+    const code = data?.code != null ? ` [code: ${data.code}]` : "";
+    const lid = logid ? ` [logid: ${logid}]` : "";
+    throw new Error((data.msg || data.message || `Coze 请求失败 (${res.status})`) + code + lid);
   }
   return data;
 }
@@ -78,84 +81,116 @@ async function uploadImageToCoze(buffer, filename, mime) {
   return String(id);
 }
 
-function parseWorkflowData(raw) {
-  if (raw == null) return {};
-  if (typeof raw === "object") return raw;
-  const text = String(raw).trim();
-  if (!text) return {};
-  try { return JSON.parse(text); }
-  catch { return { __raw: text }; }
-}
-
-function pickWorkflowText(rawData) {
-  const data = parseWorkflowData(rawData);
-  const candidates = [
-    data?.[WORKFLOW_OUTPUT_PARAM],
-    data?.final_feedback,
-    data?.result,
-    data?.output,
-    data?.answer,
-    data?.content,
-    data?.__raw
-  ];
-  for (const value of candidates) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  for (const value of Object.values(data || {})) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-async function runCozeWorkflow({ studentId, message, imageFileId }) {
+async function runCozeBot({ studentId, message, conversationId, imageFileId }) {
   ensureConfig();
 
-  const parameters = {};
-  parameters[WORKFLOW_TEXT_PARAM] = message || "请根据当前程序截图继续给我学习支架。";
-  if (imageFileId && WORKFLOW_IMAGE_PARAM) {
-    // Coze Workflow 的 Image 参数用 {"file_id":"..."} 的 JSON 字符串传入。
-    parameters[WORKFLOW_IMAGE_PARAM] = JSON.stringify({ file_id: imageFileId });
-  }
+  const text = message || (imageFileId
+    ? "请根据这张程序截图，结合我的思考过程给我提供适合当前学习水平的学习支架。"
+    : "请继续帮助我分析当前问题。");
 
-  const body = {
-    workflow_id: WORKFLOW_ID,
-    parameters,
-    ext: { user_id: `study_${studentId}` }
-  };
-  if (WORKFLOW_APP_ID) body.app_id = WORKFLOW_APP_ID;
-  if (WORKFLOW_BOT_ID) body.bot_id = WORKFLOW_BOT_ID;
+  const isMultiModal = Boolean(imageFileId);
+  const content = isMultiModal
+    ? JSON.stringify([
+        { type: "image", file_id: imageFileId },
+        { type: "text", text }
+      ])
+    : text;
 
-  const result = await cozeFetch(`${COZE_BASE}/v1/workflow/run`, {
+  const query = conversationId
+    ? `?conversation_id=${encodeURIComponent(conversationId)}`
+    : "";
+
+  const created = await cozeFetch(`${COZE_BASE}/v3/chat${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      bot_id: BOT_ID,
+      user_id: `study_${SAFE_RUN_ID}_${studentId}`,
+      stream: false,
+      auto_save_history: true,
+      additional_messages: [{
+        role: "user",
+        content,
+        content_type: isMultiModal ? "object_string" : "text"
+      }]
+    })
   });
 
-  const assistantMessage = pickWorkflowText(result?.data);
-  if (!assistantMessage) {
-    throw new Error(`工作流已执行，但未找到输出字段 ${WORKFLOW_OUTPUT_PARAM}`);
+  const chat = created?.data;
+  if (!chat?.id || !chat?.conversation_id) {
+    throw new Error("Coze 未返回 chat_id / conversation_id");
   }
 
+  let detailData = chat;
+  let status = chat.status || "created";
+
+  for (let i = 0; i < 50 && !["completed", "failed", "requires_action", "canceled"].includes(status); i++) {
+    await sleep(900);
+    const detail = await cozeFetch(
+      `${COZE_BASE}/v3/chat/retrieve?conversation_id=${encodeURIComponent(chat.conversation_id)}&chat_id=${encodeURIComponent(chat.id)}`
+    );
+    detailData = detail?.data || detailData;
+    status = detailData?.status || status;
+  }
+
+  if (status !== "completed") {
+    const lastError = detailData?.last_error;
+    const extra = lastError?.msg
+      ? `：${lastError.msg}${lastError.code ? ` (code ${lastError.code})` : ""}`
+      : "";
+    throw new Error(`智能体本轮状态：${status}${extra}`);
+  }
+
+  const msgData = await cozeFetch(
+    `${COZE_BASE}/v3/chat/message/list?conversation_id=${encodeURIComponent(chat.conversation_id)}&chat_id=${encodeURIComponent(chat.id)}`
+  );
+
+  const messages = Array.isArray(msgData?.data) ? msgData.data : [];
+  const answers = messages.filter(m =>
+    m.role === "assistant" &&
+    m.type === "answer" &&
+    typeof m.content === "string" &&
+    m.content.trim()
+  );
+  const fallback = messages.filter(m =>
+    m.role === "assistant" &&
+    m.content_type === "text" &&
+    typeof m.content === "string" &&
+    m.content.trim()
+  );
+
+  const assistantMessage = (answers.length ? answers : fallback)
+    .map(m => m.content)
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  if (!assistantMessage) throw new Error("智能体已完成本轮对话，但未获取到最终回复");
+
   return {
+    chatId: String(chat.id),
+    conversationId: String(chat.conversation_id),
     assistantMessage,
-    executeId: result?.execute_id || "",
-    debugUrl: result?.debug_url || "",
-    usage: result?.usage || null,
-    cozeLogId: result?.detail?.logid || ""
+    usage: detailData?.usage || null,
+    cozeLogId: created?.detail?.logid || msgData?.detail?.logid || ""
   };
 }
 
+function contextKey(studentId) {
+  return `context/${SAFE_RUN_ID}/${studentId}.json`;
+}
 async function getStudentContext(studentId) {
   try {
-    return await store.get(`context/${studentId}.json`, { type: "json", consistency: "strong" });
+    return await store.get(contextKey(studentId), { type: "json", consistency: "strong" });
   } catch {
     return null;
   }
 }
-
 async function saveStudentContext(studentId, context) {
-  await store.setJSON(`context/${studentId}.json`, {
+  await store.setJSON(contextKey(studentId), {
     ...context,
+    botId: BOT_ID,
+    experimentRunId: RUN_ID,
     updatedAt: new Date().toISOString()
   });
 }
@@ -195,7 +230,7 @@ function requireAdmin(req, res, next) {
 async function getLogs(studentFilter = "") {
   const { blobs = [] } = await store.list({ prefix: "logs/", consistency: "strong" });
   const logs = await Promise.all(
-    blobs.slice(-1000).map(async ({ key }) => {
+    blobs.slice(-1500).map(async ({ key }) => {
       try { return await store.get(key, { type: "json", consistency: "strong" }); }
       catch { return null; }
     })
@@ -217,11 +252,10 @@ const chatHandler = async (req, res) => {
     let imageKey = "";
     let imageFileId = "";
     let imageName = "";
-    let reusedImage = false;
 
     if (req.file) {
       const ext = extFromMime(req.file.mimetype);
-      imageKey = `images/${studentId}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+      imageKey = `images/${SAFE_RUN_ID}/${studentId}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
       imageName = req.file.originalname || `program.${ext}`;
 
       await store.set(
@@ -234,26 +268,30 @@ const chatHandler = async (req, res) => {
         imageName,
         req.file.mimetype
       );
-
-      await saveStudentContext(studentId, { imageFileId, imageKey, imageName });
-    } else {
-      const context = await getStudentContext(studentId);
-      if (context?.imageFileId) {
-        imageFileId = String(context.imageFileId);
-        imageKey = String(context.imageKey || "");
-        imageName = String(context.imageName || "");
-        reusedImage = true;
-      }
     }
 
-    if (WORKFLOW_IMAGE_PARAM && !imageFileId) {
-      return jsonError(res, 400, "请先上传程序截图，再开始与小助手对话");
+    const savedContext = await getStudentContext(studentId);
+    const conversationId = savedContext?.botId === BOT_ID
+      ? String(savedContext?.conversationId || "")
+      : "";
+
+    // 首轮要求有截图；后续轮次可只输入文字，Coze 会通过同一个 conversation 保留历史上下文。
+    if (!conversationId && !imageFileId) {
+      return jsonError(res, 400, "这是该学习编号的第一轮对话，请先上传当前程序截图");
     }
 
-    const result = await runCozeWorkflow({
+    const result = await runCozeBot({
       studentId,
       message,
+      conversationId,
       imageFileId
+    });
+
+    await saveStudentContext(studentId, {
+      conversationId: result.conversationId,
+      lastChatId: result.chatId,
+      lastImageKey: imageKey || savedContext?.lastImageKey || "",
+      lastImageName: imageName || savedContext?.lastImageName || ""
     });
 
     const levelMatch = result.assistantMessage.match(/\bLevel\s*([123])\b/i);
@@ -262,15 +300,14 @@ const chatHandler = async (req, res) => {
       timestamp: new Date().toISOString(),
       experimentRunId: RUN_ID,
       studentId,
-      workflowId: WORKFLOW_ID,
-      workflowExecuteId: result.executeId,
-      workflowDebugUrl: result.debugUrl,
+      botId: BOT_ID,
+      conversationId: result.conversationId,
+      chatId: result.chatId,
       cozeLogId: result.cozeLogId,
       message,
       imageKey,
       imageName,
       imageFileId,
-      reusedImage,
       assistantMessage: result.assistantMessage,
       level: levelMatch ? levelMatch[1] : "",
       usage: result.usage
@@ -282,8 +319,8 @@ const chatHandler = async (req, res) => {
     res.json({
       ok: true,
       assistantMessage: result.assistantMessage,
-      workflowExecuteId: result.executeId,
-      contextReady: Boolean(imageFileId)
+      conversationId: result.conversationId,
+      chatId: result.chatId
     });
   } catch (err) {
     console.error(err);
@@ -307,7 +344,6 @@ const loginHandler = (req, res) => {
     jsonError(res, 500, err.message || "登录失败");
   }
 };
-
 app.post(["/admin/login", "/api/admin/login"], loginHandler);
 
 const logsHandler = async (req, res) => {
@@ -344,10 +380,10 @@ const exportHandler = async (req, res) => {
   try {
     const logs = await getLogs("");
     const rows = [
-      ["timestamp","experimentRunId","studentId","workflowId","workflowExecuteId","cozeLogId","level","message","imageName","imageKey","imageFileId","reusedImage","assistantMessage","workflowDebugUrl"],
+      ["timestamp","experimentRunId","studentId","botId","conversationId","chatId","cozeLogId","level","message","imageName","imageKey","imageFileId","assistantMessage"],
       ...logs.map(x => [
-        x.timestamp,x.experimentRunId,x.studentId,x.workflowId,x.workflowExecuteId,x.cozeLogId,x.level,
-        x.message,x.imageName,x.imageKey,x.imageFileId,x.reusedImage,x.assistantMessage,x.workflowDebugUrl
+        x.timestamp,x.experimentRunId,x.studentId,x.botId,x.conversationId,x.chatId,x.cozeLogId,x.level,
+        x.message,x.imageName,x.imageKey,x.imageFileId,x.assistantMessage
       ])
     ];
     const csv = "\uFEFF" + rows.map(r => r.map(csvCell).join(",")).join("\n");
@@ -364,8 +400,10 @@ app.get(["/health", "/api/health"], (req, res) => {
   res.json({
     ok: true,
     service: "ai-dynamic-scaffold",
-    cozeMode: "workflow",
-    workflowConfigured: Boolean(WORKFLOW_ID)
+    cozeMode: "bot",
+    botConfigured: Boolean(BOT_ID),
+    tokenConfigured: Boolean(TOKEN),
+    experimentRunId: RUN_ID
   });
 });
 
