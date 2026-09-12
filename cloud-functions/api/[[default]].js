@@ -124,8 +124,15 @@ async function runCozeBot({ studentId, message, conversationId, imageFileId }) {
   let detailData = chat;
   let status = chat.status || "created";
 
-  for (let i = 0; i < 50 && !["completed", "failed", "requires_action", "canceled"].includes(status); i++) {
-    await sleep(900);
+  // 复杂对话流可能包含多次大模型/知识库/子工作流调用，45 秒不足。
+  // EdgeOne Cloud Functions 已配置为 120 秒；这里最多等待约 105 秒，
+  // 给图片上传、消息读取和最终响应预留约 15 秒缓冲。
+  const pollDeadline = Date.now() + 105_000;
+  while (
+    Date.now() < pollDeadline &&
+    !["completed", "failed", "requires_action", "canceled"].includes(status)
+  ) {
+    await sleep(1500);
     const detail = await cozeFetch(
       `${COZE_BASE}/v3/chat/retrieve?conversation_id=${encodeURIComponent(chat.conversation_id)}&chat_id=${encodeURIComponent(chat.id)}`
     );

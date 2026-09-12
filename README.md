@@ -63,3 +63,15 @@ EXPERIMENT_RUN_ID=pilot02
 - `/api/admin/logs` 日志
 - `/api/admin/export` CSV
 - `/api/health` 健康检查
+
+
+## 2026-09-12 长耗时对话流修复
+
+如果 `/api/chat` 返回 `智能体本轮状态：in_progress`，说明 Bot 已经成功接收请求，但其内部对话流/工作流在旧版约 45 秒等待窗口内尚未完成。
+
+本版将：
+- EdgeOne Cloud Functions `maxDuration` 从 60 秒提高到 120 秒；
+- Bot 状态轮询窗口提高到约 105 秒；
+- 每 1.5 秒查询一次状态，并为最终消息读取保留约 15 秒缓冲。
+
+如果 105 秒后仍持续 `in_progress`，应进一步优化 Coze 工作流耗时，或改造成前端异步轮询模式。
