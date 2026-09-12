@@ -164,7 +164,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const state = { studentId:"", initialFile:null, pendingFile:null, sending:false };
+    const state = { studentId:"", initialFile:null, pendingFile:null, sending:false, activeJob:"" };
     const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
     const historyKey = sid => "ai_scaffold_chat_" + sid;
 
@@ -208,9 +208,10 @@
         entries.forEach(item => addMessage(item.text || "", item.role, item.imageName));
       } catch (err) { console.warn("聊天记录读取失败", err); }
     }
-    function enterChat(sid) {
+    function enterChat(sid, fresh=false) {
       state.studentId = sid;
       localStorage.setItem("ai_scaffold_student_id", sid);
+      if (fresh) localStorage.removeItem(historyKey(sid));
       $("activeStudent").textContent = sid; $("startCard").style.display = "none"; $("chatShell").style.display = "block";
       restoreHistory(sid);
     }
@@ -227,33 +228,57 @@
       row.innerHTML = "小助手正在思考 <span class=\"dots\"><i></i><i></i><i></i></span>";
       $("chat").appendChild(row); row.scrollIntoView({behavior:"smooth", block:"end"});
     }
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    async function pollJob(jobToken) {
+      const deadline = Date.now() + 8 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await wait(2000);
+        const res = await fetch("/api/chat/status?job=" + encodeURIComponent(jobToken), { cache:"no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "查询智能体状态失败");
+        if (data.done) return data;
+        if (data.status === "in_progress" || data.status === "created") continue;
+        throw new Error("智能体本轮状态：" + (data.status || "unknown"));
+      }
+      throw new Error("小助手处理时间超过 8 分钟，请重新开始本轮对话");
+    }
     async function sendTurn(text, file, firstTurn=false) {
       if (state.sending) return;
       if (!state.studentId) { alert("请先填写学习编号。"); return; }
       if (firstTurn && !file) { alert("请先上传当前程序截图，再开始检查。"); return; }
       if (!file && !text) { alert("请输入想回答的话，或上传新的程序截图。"); return; }
       state.sending = true; $("sendBtn").disabled = true; $("startBtn").disabled = true; setThinking(true);
+      $("status").textContent = "程序分析可能需要约 1 分钟，请保持页面打开。";
       const imageUrl = file ? URL.createObjectURL(file) : "";
       addMessage(text || "已上传程序截图", "user", file?.name || "", imageUrl);
-      const fd = new FormData(); fd.append("studentId", state.studentId); fd.append("message", text);
+      const fd = new FormData();
+      fd.append("studentId", state.studentId);
+      fd.append("message", text);
+      fd.append("newSession", firstTurn ? "1" : "0");
       if (file) fd.append("image", file);
       try {
-        const res = await fetch("/api/chat", {method:"POST", body:fd});
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "请求失败");
+        const startRes = await fetch("/api/chat/start", {method:"POST", body:fd});
+        const startData = await startRes.json();
+        if (!startRes.ok) throw new Error(startData.error || "发起对话失败");
+        state.activeJob = startData.jobToken;
+        const data = await pollJob(startData.jobToken);
         addMessage(data.assistantMessage || "小助手暂时没有回复成功，请稍后再试一次。", "assistant");
         $("initialMessage").value = ""; $("chatMessage").value = "";
         if (firstTurn) { clearPreview($("initialPreview"), $("initialImage")); state.initialFile = null; }
         else { clearPreview($("pendingPreview"), $("chatImage")); state.pendingFile = null; }
       } catch (err) {
-        console.error(err); addMessage(DEBUG_MODE ? ("调试错误：" + err.message) : "小助手暂时没有回复成功，请稍后再试一次。", "assistant");
-      } finally { setThinking(false); state.sending = false; $("sendBtn").disabled = false; $("startBtn").disabled = false; }
+        console.error(err);
+        addMessage(DEBUG_MODE ? ("调试错误：" + err.message) : "小助手暂时没有回复成功，请稍后再试一次。", "assistant");
+      } finally {
+        state.activeJob = ""; setThinking(false); $("status").textContent = "";
+        state.sending = false; $("sendBtn").disabled = false; $("startBtn").disabled = false;
+      }
     }
     $("studentId").value = localStorage.getItem("ai_scaffold_student_id") || "";
     $("initialUpload").onclick = e => { if (e.target !== $("initialImage")) $("initialImage").click(); };
     $("initialImage").onchange = () => { const file=$("initialImage").files[0]; if (!validateFile(file)) return clearPreview($("initialPreview"), $("initialImage")); state.initialFile=file; showPreview($("initialPreview"),file); };
     $("initialPreview").querySelector(".file-action").onclick = () => { state.initialFile=null; clearPreview($("initialPreview"),$("initialImage")); };
-    $("startBtn").onclick = () => { const sid=$("studentId").value.trim(); if (!sid) return alert("请先填写学习编号。"); localStorage.setItem("ai_scaffold_student_id",sid); enterChat(sid); sendTurn($("initialMessage").value.trim(),state.initialFile,true); };
+    $("startBtn").onclick = () => { const sid=$("studentId").value.trim(); if (!sid) return alert("请先填写学习编号。"); localStorage.setItem("ai_scaffold_student_id",sid); enterChat(sid,true); sendTurn($("initialMessage").value.trim(),state.initialFile,true); };
     $("attachBtn").onclick = () => $("chatImage").click();
     $("chatImage").onchange = () => { const file=$("chatImage").files[0]; if (!validateFile(file)) return clearPreview($("pendingPreview"),$("chatImage")); state.pendingFile=file; showPreview($("pendingPreview"),file); };
     $("removePending").onclick = () => { state.pendingFile=null; clearPreview($("pendingPreview"),$("chatImage")); };

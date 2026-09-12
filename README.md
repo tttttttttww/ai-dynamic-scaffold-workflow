@@ -1,77 +1,67 @@
-# AI Dynamic Scaffold · Bot API 版
+# AI 动态学习支架（Bot + 图片 URL + 异步轮询版）
 
-这是当前建议部署版本：网页只调用 Coze 智能体（Bot），Bot 内部继续运行已配置好的对话流/工作流。
+本版针对“Coze 正式体验页能完成，但网站 API 一直停在 `in_progress`”做了两项核心修复，并顺带移除了 120 秒同步等待限制。
 
-## 功能
+## 核心修复
 
-- 学生匿名编号（如 S01）
-- 第一轮上传程序截图 + 文字，可继续多轮文字对话
-- 图片先上传 Coze，再通过 `/v3/chat` 发送给 Bot
-- 同一学生、同一 `EXPERIMENT_RUN_ID` 自动续接同一 conversation
-- EdgeOne Blob 持久保存截图、会话上下文和交互日志
-- 管理后台查看日志、查看截图、导出 CSV
-- `/api/health` 可检查 Bot 与 Token 是否配置
-- 测试时访问首页加 `?debug=1`，前端会显示真实后端错误；正式给学生的网址不要加这个参数
+1. **图片改为 `file_url` 传给 Bot**
+   - 学生图片仍保存在 EdgeOne Blob。
+   - 后端为图片生成一个带 HMAC 签名、12 小时有效的 HTTPS 地址。
+   - `/v3/chat` 的多模态消息使用 `file_url`，让 Bot 后续调用内部工具时可以直接拿到图片 URL。
+   - 不再依赖 Coze `file_id` 做这一层传递。
+
+2. **每次从“开始检查程序”进入都强制新建 conversation**
+   - 同一个学生编号重新开始时，不再复用历史测试 conversation。
+   - 同一轮后续文字追问仍继续使用本轮新 conversation。
+
+3. **改成异步轮询**
+   - `/api/chat/start` 只负责发起 Coze 对话，立即返回。
+   - 浏览器每 2 秒调用 `/api/chat/status` 查询状态。
+   - 最多可等待 8 分钟，不再受 EdgeOne 单次函数 120 秒限制。
+   - 日志从发起时就写入，完成后更新为 `completed`。
 
 ## 腾讯云环境变量
 
-必须配置：
+保持这 5 个即可：
 
-```text
-COZE_ACCESS_TOKEN=你的 Coze 服务身份凭证
-COZE_BOT_ID=7652241106834472996
-ADMIN_PASSWORD=你自己设置的管理员密码
-ADMIN_SESSION_SECRET=至少 32 位随机字符串
-EXPERIMENT_RUN_ID=pilot01
+- `COZE_ACCESS_TOKEN`
+- `COZE_BOT_ID`
+- `ADMIN_PASSWORD`
+- `ADMIN_SESSION_SECRET`
+- `EXPERIMENT_RUN_ID`
+
+无需 Workflow ID。
+
+## Coze 权限
+
+本版需要：
+
+- 发起对话 `chat`
+- 查询对话 `getChat`
+- 查询消息 `listMessage`
+
+因为图片改为网站自己的临时 HTTPS URL，本版不再必须调用 Coze 上传文件接口；已有 `uploadFile` 权限保留也没有影响。
+
+## 部署后检查
+
+访问：
+
+`/api/health`
+
+应看到：
+
+```json
+{
+  "ok": true,
+  "cozeMode": "bot-file-url-async",
+  "botConfigured": true,
+  "tokenConfigured": true,
+  "asyncPolling": true
+}
 ```
 
-### Coze 服务身份权限
+测试时推荐打开：
 
-至少需要：
+`/?debug=1`
 
-- `chat`：调用 `/v3/chat`
-- `uploadFile`：上传学生截图
-
-Bot 及其内部使用的对话流/工作流需要已经发布，并且此凭证对 Bot 所在空间有访问权限。
-
-## EdgeOne 构建设置
-
-```text
-框架预设：Other
-根目录：./
-输出目录：public
-构建命令：留空
-安装命令：npm install
-生产分支：main
-```
-
-## 重要：实验批次
-
-每次新的预实验或正式实验建议修改：
-
-```text
-EXPERIMENT_RUN_ID=pilot02
-```
-
-服务器会按批次隔离学生的 conversation，避免 S01 在新一轮实验中接着上一轮的聊天记录。
-
-## 路径
-
-- `/` 学生端
-- `/admin.html` 管理后台
-- `/api/chat` Bot 对话接口
-- `/api/admin/logs` 日志
-- `/api/admin/export` CSV
-- `/api/health` 健康检查
-
-
-## 2026-09-12 长耗时对话流修复
-
-如果 `/api/chat` 返回 `智能体本轮状态：in_progress`，说明 Bot 已经成功接收请求，但其内部对话流/工作流在旧版约 45 秒等待窗口内尚未完成。
-
-本版将：
-- EdgeOne Cloud Functions `maxDuration` 从 60 秒提高到 120 秒；
-- Bot 状态轮询窗口提高到约 105 秒；
-- 每 1.5 秒查询一次状态，并为最终消息读取保留约 15 秒缓冲。
-
-如果 105 秒后仍持续 `in_progress`，应进一步优化 Coze 工作流耗时，或改造成前端异步轮询模式。
+如果失败，学生页面会显示真实错误信息。

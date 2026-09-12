@@ -33,9 +33,7 @@ const SAFE_RUN_ID = safeId(RUN_ID) || "default";
 function ensureConfig() {
   if (!TOKEN) throw new Error("COZE_ACCESS_TOKEN 未配置");
   if (!BOT_ID) throw new Error("COZE_BOT_ID 未配置");
-}
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  if (!ADMIN_SECRET) throw new Error("ADMIN_SESSION_SECRET 未配置");
 }
 function jsonError(res, status, message) {
   return res.status(status).json({ error: message });
@@ -69,29 +67,38 @@ async function cozeFetch(url, options = {}) {
   return data;
 }
 
-async function uploadImageToCoze(buffer, filename, mime) {
-  const form = new FormData();
-  form.append("file", new Blob([buffer], { type: mime }), filename || "image.jpg");
-  const data = await cozeFetch(`${COZE_BASE}/v1/files/upload`, {
-    method: "POST",
-    body: form
-  });
-  const id = data?.data?.id || data?.data?.file_id;
-  if (!id) throw new Error("Coze 未返回 file_id");
-  return String(id);
+function imageSignature(key, exp) {
+  return crypto.createHmac("sha256", ADMIN_SECRET).update(`${key}\n${exp}`).digest("base64url");
+}
+function makePublicImageUrl(req, key) {
+  // 给 Coze 一个真实可访问的 HTTPS 图片 URL，避免 Bot 看见 file_id 后无法继续把图片 URL 传给内部工具。
+  const forwarded = String(req.get("x-forwarded-proto") || "").split(",")[0].trim();
+  const proto = forwarded || "https";
+  const host = req.get("host");
+  const exp = Math.floor(Date.now() / 1000) + 12 * 60 * 60; // 12 小时，覆盖课堂/调试会话
+  const sig = imageSignature(key, exp);
+  return `${proto}://${host}/api/public-image?key=${encodeURIComponent(key)}&exp=${exp}&sig=${encodeURIComponent(sig)}`;
+}
+function verifyPublicImage(key, expRaw, sig) {
+  const exp = Number(expRaw);
+  if (!key.startsWith("images/") || !Number.isFinite(exp) || exp < Math.floor(Date.now() / 1000)) return false;
+  const expected = imageSignature(key, exp);
+  const a = Buffer.from(String(sig || ""));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-async function runCozeBot({ studentId, message, conversationId, imageFileId }) {
+async function startCozeBot({ studentId, message, conversationId, imageUrl }) {
   ensureConfig();
 
-  const text = message || (imageFileId
+  const text = message || (imageUrl
     ? "请根据这张程序截图，结合我的思考过程给我提供适合当前学习水平的学习支架。"
     : "请继续帮助我分析当前问题。");
 
-  const isMultiModal = Boolean(imageFileId);
+  const isMultiModal = Boolean(imageUrl);
   const content = isMultiModal
     ? JSON.stringify([
-        { type: "image", file_id: imageFileId },
+        { type: "image", file_url: imageUrl },
         { type: "text", text }
       ])
     : text;
@@ -121,37 +128,28 @@ async function runCozeBot({ studentId, message, conversationId, imageFileId }) {
     throw new Error("Coze 未返回 chat_id / conversation_id");
   }
 
-  let detailData = chat;
-  let status = chat.status || "created";
+  return {
+    chatId: String(chat.id),
+    conversationId: String(chat.conversation_id),
+    status: String(chat.status || "created"),
+    cozeLogId: created?.detail?.logid || ""
+  };
+}
 
-  // 复杂对话流可能包含多次大模型/知识库/子工作流调用，45 秒不足。
-  // EdgeOne Cloud Functions 已配置为 120 秒；这里最多等待约 105 秒，
-  // 给图片上传、消息读取和最终响应预留约 15 秒缓冲。
-  const pollDeadline = Date.now() + 105_000;
-  while (
-    Date.now() < pollDeadline &&
-    !["completed", "failed", "requires_action", "canceled"].includes(status)
-  ) {
-    await sleep(1500);
-    const detail = await cozeFetch(
-      `${COZE_BASE}/v3/chat/retrieve?conversation_id=${encodeURIComponent(chat.conversation_id)}&chat_id=${encodeURIComponent(chat.id)}`
-    );
-    detailData = detail?.data || detailData;
-    status = detailData?.status || status;
-  }
-
-  if (status !== "completed") {
-    const lastError = detailData?.last_error;
-    const extra = lastError?.msg
-      ? `：${lastError.msg}${lastError.code ? ` (code ${lastError.code})` : ""}`
-      : "";
-    throw new Error(`智能体本轮状态：${status}${extra}`);
-  }
-
-  const msgData = await cozeFetch(
-    `${COZE_BASE}/v3/chat/message/list?conversation_id=${encodeURIComponent(chat.conversation_id)}&chat_id=${encodeURIComponent(chat.id)}`
+async function retrieveCozeChat(conversationId, chatId) {
+  const detail = await cozeFetch(
+    `${COZE_BASE}/v3/chat/retrieve?conversation_id=${encodeURIComponent(conversationId)}&chat_id=${encodeURIComponent(chatId)}`
   );
+  return {
+    ...(detail?.data || {}),
+    cozeLogId: detail?.detail?.logid || ""
+  };
+}
 
+async function getCozeAnswer(conversationId, chatId) {
+  const msgData = await cozeFetch(
+    `${COZE_BASE}/v3/chat/message/list?conversation_id=${encodeURIComponent(conversationId)}&chat_id=${encodeURIComponent(chatId)}`
+  );
   const messages = Array.isArray(msgData?.data) ? msgData.data : [];
   const answers = messages.filter(m =>
     m.role === "assistant" &&
@@ -163,23 +161,19 @@ async function runCozeBot({ studentId, message, conversationId, imageFileId }) {
     m.role === "assistant" &&
     m.content_type === "text" &&
     typeof m.content === "string" &&
-    m.content.trim()
+    m.content.trim() &&
+    !["function_call", "tool_response", "tool_output"].includes(m.type)
   );
-
   const assistantMessage = (answers.length ? answers : fallback)
     .map(m => m.content)
     .filter(Boolean)
     .join("\n")
     .trim();
 
-  if (!assistantMessage) throw new Error("智能体已完成本轮对话，但未获取到最终回复");
-
   return {
-    chatId: String(chat.id),
-    conversationId: String(chat.conversation_id),
     assistantMessage,
-    usage: detailData?.usage || null,
-    cozeLogId: created?.detail?.logid || msgData?.detail?.logid || ""
+    messages,
+    cozeLogId: msgData?.detail?.logid || ""
   };
 }
 
@@ -202,31 +196,39 @@ async function saveStudentContext(studentId, context) {
   });
 }
 
-function issueAdminToken() {
+function issueSignedToken(payloadObject, ttlMs) {
   if (!ADMIN_SECRET) throw new Error("ADMIN_SESSION_SECRET 未配置");
   const payload = Buffer.from(JSON.stringify({
-    exp: Date.now() + 8 * 60 * 60 * 1000
+    ...payloadObject,
+    exp: Date.now() + ttlMs
   })).toString("base64url");
   const sig = crypto.createHmac("sha256", ADMIN_SECRET).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
-
-function verifyAdminToken(token) {
-  if (!token || !ADMIN_SECRET) return false;
-  const [payload, sig] = token.split(".");
-  if (!payload || !sig) return false;
+function verifySignedToken(token) {
+  if (!token || !ADMIN_SECRET) return null;
+  const [payload, sig] = String(token).split(".");
+  if (!payload || !sig) return null;
   const expected = crypto.createHmac("sha256", ADMIN_SECRET).update(payload).digest("base64url");
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return Number(data.exp) > Date.now();
+    if (Number(data.exp) <= Date.now()) return null;
+    return data;
   } catch {
-    return false;
+    return null;
   }
 }
 
+function issueAdminToken() {
+  return issueSignedToken({ kind: "admin" }, 8 * 60 * 60 * 1000);
+}
+function verifyAdminToken(token) {
+  const data = verifySignedToken(token);
+  return Boolean(data && data.kind === "admin");
+}
 function requireAdmin(req, res, next) {
   const auth = req.get("authorization") || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -248,100 +250,222 @@ async function getLogs(studentFilter = "") {
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 }
 
-const chatHandler = async (req, res) => {
+// Coze 直接拉取该 URL 获取图片。URL 带 HMAC 签名且有时效，不暴露管理员接口。
+app.get(["/public-image", "/api/public-image"], async (req, res) => {
   try {
+    const key = String(req.query.key || "");
+    const exp = String(req.query.exp || "");
+    const sig = String(req.query.sig || "");
+    if (!verifyPublicImage(key, exp, sig)) return jsonError(res, 403, "图片链接已失效");
+    const data = await store.get(key, { type: "arrayBuffer", consistency: "strong" });
+    if (!data) return jsonError(res, 404, "图片不存在");
+    res.set("Content-Type", mimeFromKey(key));
+    res.set("Cache-Control", "public, max-age=300");
+    res.send(Buffer.from(data));
+  } catch (err) {
+    jsonError(res, 500, err.message || "读取图片失败");
+  }
+});
+
+const chatStartHandler = async (req, res) => {
+  try {
+    ensureConfig();
     const studentId = safeId(req.body.studentId);
     const message = String(req.body.message || "").trim().slice(0, 4000);
+    const newSession = String(req.body.newSession || "") === "1";
 
     if (!studentId) return jsonError(res, 400, "学习编号不能为空");
     if (!req.file && !message) return jsonError(res, 400, "请上传截图或输入回答");
 
     let imageKey = "";
-    let imageFileId = "";
     let imageName = "";
+    let imageUrl = "";
 
     if (req.file) {
       const ext = extFromMime(req.file.mimetype);
       imageKey = `images/${SAFE_RUN_ID}/${studentId}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
       imageName = req.file.originalname || `program.${ext}`;
-
-      await store.set(
-        imageKey,
-        new Blob([req.file.buffer], { type: req.file.mimetype })
-      );
-
-      imageFileId = await uploadImageToCoze(
-        req.file.buffer,
-        imageName,
-        req.file.mimetype
-      );
+      await store.set(imageKey, new Blob([req.file.buffer], { type: req.file.mimetype }));
+      imageUrl = makePublicImageUrl(req, imageKey);
     }
 
     const savedContext = await getStudentContext(studentId);
-    const conversationId = savedContext?.botId === BOT_ID
+    const conversationId = !newSession && savedContext?.botId === BOT_ID
       ? String(savedContext?.conversationId || "")
       : "";
 
-    // 首轮要求有截图；后续轮次可只输入文字，Coze 会通过同一个 conversation 保留历史上下文。
-    if (!conversationId && !imageFileId) {
-      return jsonError(res, 400, "这是该学习编号的第一轮对话，请先上传当前程序截图");
+    // 每次从“开始检查程序”进入都强制新建 Coze conversation，避免历史测试会话污染。
+    if (!conversationId && !imageUrl) {
+      return jsonError(res, 400, "这是新一轮学习对话，请先上传当前程序截图");
     }
 
-    const result = await runCozeBot({
+    const startedAt = Date.now();
+    const started = await startCozeBot({
       studentId,
       message,
       conversationId,
-      imageFileId
+      imageUrl
     });
 
     await saveStudentContext(studentId, {
-      conversationId: result.conversationId,
-      lastChatId: result.chatId,
+      conversationId: started.conversationId,
+      lastChatId: started.chatId,
       lastImageKey: imageKey || savedContext?.lastImageKey || "",
       lastImageName: imageName || savedContext?.lastImageName || ""
     });
 
-    const levelMatch = result.assistantMessage.match(/\bLevel\s*([123])\b/i);
-
-    const log = {
-      timestamp: new Date().toISOString(),
+    const logKey = `logs/chat-${started.chatId}.json`;
+    await store.setJSON(logKey, {
+      timestamp: new Date(startedAt).toISOString(),
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+      status: started.status,
       experimentRunId: RUN_ID,
       studentId,
       botId: BOT_ID,
-      conversationId: result.conversationId,
-      chatId: result.chatId,
-      cozeLogId: result.cozeLogId,
+      conversationId: started.conversationId,
+      chatId: started.chatId,
+      cozeLogId: started.cozeLogId,
       message,
       imageKey,
       imageName,
-      imageFileId,
-      assistantMessage: result.assistantMessage,
-      level: levelMatch ? levelMatch[1] : "",
-      usage: result.usage
-    };
+      imageUrl,
+      assistantMessage: "",
+      level: "",
+      usage: null,
+      error: "",
+      newSession
+    });
 
-    const logKey = `logs/${Date.now()}-${studentId}-${crypto.randomUUID()}.json`;
-    await store.setJSON(logKey, log);
+    const jobToken = issueSignedToken({
+      kind: "chat-job",
+      studentId,
+      chatId: started.chatId,
+      conversationId: started.conversationId,
+      logKey
+    }, 20 * 60 * 1000);
 
-    res.json({
+    res.status(202).json({
       ok: true,
-      assistantMessage: result.assistantMessage,
-      conversationId: result.conversationId,
-      chatId: result.chatId
+      status: started.status,
+      jobToken,
+      chatId: started.chatId,
+      conversationId: started.conversationId
     });
   } catch (err) {
     console.error(err);
     jsonError(res, 500, err.message || "服务器错误");
   }
 };
+app.post(["/chat/start", "/api/chat/start"], upload.single("image"), chatStartHandler);
 
-app.post(["/chat", "/api/chat"], upload.single("image"), chatHandler);
+const chatStatusHandler = async (req, res) => {
+  try {
+    ensureConfig();
+    const job = verifySignedToken(String(req.query.job || ""));
+    if (!job || job.kind !== "chat-job") return jsonError(res, 401, "本轮对话查询已失效，请重新开始");
+
+    let log;
+    try { log = await store.get(job.logKey, { type: "json", consistency: "strong" }); }
+    catch { log = null; }
+
+    if (log?.status === "completed" && log?.assistantMessage) {
+      return res.json({
+        ok: true,
+        done: true,
+        status: "completed",
+        assistantMessage: log.assistantMessage,
+        conversationId: job.conversationId,
+        chatId: job.chatId
+      });
+    }
+
+    const detail = await retrieveCozeChat(job.conversationId, job.chatId);
+    const status = String(detail?.status || "unknown");
+    const now = Date.now();
+
+    if (["created", "in_progress"].includes(status)) {
+      if (log) {
+        await store.setJSON(job.logKey, {
+          ...log,
+          status,
+          usage: detail?.usage || log.usage || null,
+          cozeLogId: detail?.cozeLogId || log.cozeLogId || "",
+          lastPolledAt: new Date(now).toISOString()
+        });
+      }
+      return res.status(202).json({ ok: true, done: false, status });
+    }
+
+    if (status !== "completed") {
+      const lastError = detail?.last_error;
+      const error = lastError?.msg
+        ? `${lastError.msg}${lastError.code ? ` (code ${lastError.code})` : ""}`
+        : `智能体本轮状态：${status}`;
+      if (log) {
+        await store.setJSON(job.logKey, {
+          ...log,
+          status,
+          error,
+          completedAt: new Date(now).toISOString(),
+          durationMs: log.startedAt ? now - log.startedAt : null,
+          usage: detail?.usage || log.usage || null,
+          cozeLogId: detail?.cozeLogId || log.cozeLogId || ""
+        });
+      }
+      // 避免失败会话继续污染下一轮；下次从开始页重新建立 conversation。
+      await saveStudentContext(job.studentId, { conversationId: "", lastChatId: job.chatId });
+      return jsonError(res, 500, error);
+    }
+
+    const answer = await getCozeAnswer(job.conversationId, job.chatId);
+    if (!answer.assistantMessage) return jsonError(res, 500, "智能体已完成本轮对话，但未获取到最终回复");
+
+    const levelMatch = answer.assistantMessage.match(/\bLevel\s*([123])\b/i);
+    const completedAt = Date.now();
+    const finalLog = {
+      ...(log || {}),
+      timestamp: log?.timestamp || new Date().toISOString(),
+      status: "completed",
+      completedAt: new Date(completedAt).toISOString(),
+      durationMs: log?.startedAt ? completedAt - log.startedAt : null,
+      experimentRunId: RUN_ID,
+      studentId: job.studentId,
+      botId: BOT_ID,
+      conversationId: job.conversationId,
+      chatId: job.chatId,
+      cozeLogId: answer.cozeLogId || detail?.cozeLogId || log?.cozeLogId || "",
+      assistantMessage: answer.assistantMessage,
+      level: levelMatch ? levelMatch[1] : "",
+      usage: detail?.usage || log?.usage || null,
+      error: ""
+    };
+    await store.setJSON(job.logKey, finalLog);
+
+    return res.json({
+      ok: true,
+      done: true,
+      status: "completed",
+      assistantMessage: answer.assistantMessage,
+      conversationId: job.conversationId,
+      chatId: job.chatId
+    });
+  } catch (err) {
+    console.error(err);
+    jsonError(res, 500, err.message || "查询智能体状态失败");
+  }
+};
+app.get(["/chat/status", "/api/chat/status"], chatStatusHandler);
+
+// 旧前端若仍命中 /api/chat，明确提示刷新，避免继续执行旧的 120 秒同步等待逻辑。
+app.post(["/chat", "/api/chat"], upload.single("image"), (req, res) => {
+  res.status(409).json({ error: "客户端版本已更新，请刷新页面后重新开始对话" });
+});
 
 const loginHandler = (req, res) => {
   try {
-    if (!ADMIN_PASSWORD || !ADMIN_SECRET) {
-      return jsonError(res, 500, "管理员环境变量未配置");
-    }
+    if (!ADMIN_PASSWORD || !ADMIN_SECRET) return jsonError(res, 500, "管理员环境变量未配置");
     const input = Buffer.from(String(req.body.password || ""));
     const real = Buffer.from(String(ADMIN_PASSWORD));
     const ok = input.length === real.length && crypto.timingSafeEqual(input, real);
@@ -387,10 +511,10 @@ const exportHandler = async (req, res) => {
   try {
     const logs = await getLogs("");
     const rows = [
-      ["timestamp","experimentRunId","studentId","botId","conversationId","chatId","cozeLogId","level","message","imageName","imageKey","imageFileId","assistantMessage"],
+      ["timestamp","completedAt","durationMs","status","experimentRunId","studentId","botId","conversationId","chatId","cozeLogId","level","message","imageName","imageKey","imageUrl","assistantMessage","error"],
       ...logs.map(x => [
-        x.timestamp,x.experimentRunId,x.studentId,x.botId,x.conversationId,x.chatId,x.cozeLogId,x.level,
-        x.message,x.imageName,x.imageKey,x.imageFileId,x.assistantMessage
+        x.timestamp,x.completedAt,x.durationMs,x.status,x.experimentRunId,x.studentId,x.botId,x.conversationId,x.chatId,x.cozeLogId,x.level,
+        x.message,x.imageName,x.imageKey,x.imageUrl,x.assistantMessage,x.error
       ])
     ];
     const csv = "\uFEFF" + rows.map(r => r.map(csvCell).join(",")).join("\n");
@@ -407,9 +531,10 @@ app.get(["/health", "/api/health"], (req, res) => {
   res.json({
     ok: true,
     service: "ai-dynamic-scaffold",
-    cozeMode: "bot",
+    cozeMode: "bot-file-url-async",
     botConfigured: Boolean(BOT_ID),
     tokenConfigured: Boolean(TOKEN),
+    asyncPolling: true,
     experimentRunId: RUN_ID
   });
 });

@@ -88,14 +88,14 @@ async function loadLogs() {
         </div>
         <div class="meta">${esc(fmtTime(x.timestamp))}</div>
       </div>
-      <div class="meta">bot: ${esc(x.botId || "")} ${x.conversationId ? `· conversation: ${esc(x.conversationId)}` : ""} ${x.chatId ? `· chat: ${esc(x.chatId)}` : ""}</div>
+      <div class="meta">状态: ${esc(x.status || "")} ${x.durationMs ? `· 耗时 ${(Number(x.durationMs)/1000).toFixed(1)} 秒` : ""} · bot: ${esc(x.botId || "")} ${x.conversationId ? `· conversation: ${esc(x.conversationId)}` : ""} ${x.chatId ? `· chat: ${esc(x.chatId)}` : ""}</div>
       <div class="msg">
         <div class="label">学生输入</div>
         ${esc(x.message || "(仅上传截图)")}
       </div>
       <div class="answer">
         <div class="label">AI 回复</div>
-        ${esc(x.assistantMessage || "")}
+        ${esc(x.assistantMessage || (x.error ? "错误：" + x.error : (x.status && x.status !== "completed" ? "处理中：" + x.status : "")))}
       </div>
       ${x.imageKey ? `<div style="margin-top:12px"><button data-image="${esc(x.imageKey)}">查看截图</button></div>` : ""}
     </article>
