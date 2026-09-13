@@ -1,3 +1,11 @@
+# ⚠️ v2 Parameters Fix（2026-09-13）
+
+本版针对 Coze 返回 `The input parameters provided to the model are invalid. (code 4000)`：在保留图片多模态消息的同时，将外层**对话流开始节点**所需的图片自定义参数通过 `/v3/chat` 的顶层 `parameters` 传入。详见 `PARAMETERS_FIX.md`。
+
+默认 `COZE_FLOW_IMAGE_PARAM=program_image`；文本默认走对话流内置 `USER_INPUT`，只有外层开始节点另有必填 String 自定义参数时才配置 `COZE_FLOW_TEXT_PARAM`。
+
+---
+
 # AI 动态学习支架（Bot + 图片 URL + 异步轮询版）
 
 本版针对“Coze 正式体验页能完成，但网站 API 一直停在 `in_progress`”做了两项核心修复，并顺带移除了 120 秒同步等待限制。

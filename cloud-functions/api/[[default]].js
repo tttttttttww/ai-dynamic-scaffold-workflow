@@ -24,6 +24,10 @@ const BOT_ID = process.env.COZE_BOT_ID;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ADMIN_SECRET = process.env.ADMIN_SESSION_SECRET;
 const RUN_ID = process.env.EXPERIMENT_RUN_ID || "default";
+// 对话流“开始”节点里的自定义输入参数名。图片参数默认沿用当前项目工作流中的 program_image。
+// 文本通常直接通过 additional_messages -> USER_INPUT 进入对话流，因此默认不额外传。
+const FLOW_IMAGE_PARAM = String(process.env.COZE_FLOW_IMAGE_PARAM || "program_image").trim();
+const FLOW_TEXT_PARAM = String(process.env.COZE_FLOW_TEXT_PARAM || "").trim();
 
 function safeId(v) {
   return String(v || "").trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40);
@@ -88,39 +92,55 @@ function verifyPublicImage(key, expRaw, sig) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-async function startCozeBot({ studentId, message, conversationId, imageUrl }) {
+async function startCozeBot({ studentId, message, conversationId, messageImageUrl, flowImageUrl }) {
   ensureConfig();
 
-  const text = message || (imageUrl
+  const text = message || (flowImageUrl
     ? "请根据这张程序截图，结合我的思考过程给我提供适合当前学习水平的学习支架。"
     : "请继续帮助我分析当前问题。");
 
-  const isMultiModal = Boolean(imageUrl);
+  // 1) 新上传的图片作为本轮用户消息发送，让智能体/模型可以直接看到图片。
+  //    后续纯文本追问不会重复把旧图塞进消息，只会在 parameters 中复用旧图。
+  const isMultiModal = Boolean(messageImageUrl);
   const content = isMultiModal
     ? JSON.stringify([
-        { type: "image", file_url: imageUrl },
+        { type: "image", file_url: messageImageUrl },
         { type: "text", text }
       ])
     : text;
+
+  // 2) 关键修复：如果 Bot 使用“对话流模式”，对话流开始节点的自定义参数
+  //    不能只靠 additional_messages 传入，必须通过 v3/chat 顶层 parameters 赋值。
+  //    Image 类型自定义参数支持直接传公开可访问的 HTTPS URL。
+  const parameters = {};
+  if (FLOW_IMAGE_PARAM && flowImageUrl) {
+    parameters[FLOW_IMAGE_PARAM] = flowImageUrl;
+  }
+  if (FLOW_TEXT_PARAM) {
+    parameters[FLOW_TEXT_PARAM] = text;
+  }
 
   const query = conversationId
     ? `?conversation_id=${encodeURIComponent(conversationId)}`
     : "";
 
+  const body = {
+    bot_id: BOT_ID,
+    user_id: `study_${SAFE_RUN_ID}_${studentId}`,
+    stream: false,
+    auto_save_history: true,
+    additional_messages: [{
+      role: "user",
+      content,
+      content_type: isMultiModal ? "object_string" : "text"
+    }]
+  };
+  if (Object.keys(parameters).length) body.parameters = parameters;
+
   const created = await cozeFetch(`${COZE_BASE}/v3/chat${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      bot_id: BOT_ID,
-      user_id: `study_${SAFE_RUN_ID}_${studentId}`,
-      stream: false,
-      auto_save_history: true,
-      additional_messages: [{
-        role: "user",
-        content,
-        content_type: isMultiModal ? "object_string" : "text"
-      }]
-    })
+    body: JSON.stringify(body)
   });
 
   const chat = created?.data;
@@ -299,18 +319,24 @@ const chatStartHandler = async (req, res) => {
       return jsonError(res, 400, "这是新一轮学习对话，请先上传当前程序截图");
     }
 
+    // 后续纯文本轮次仍可能重新进入同一对话流。若开始节点把 program_image 设为必填，
+    // 就必须把本轮最近一次截图继续作为 parameters 传入，不能只在第一轮给一次。
+    const effectiveImageKey = imageKey || savedContext?.lastImageKey || "";
+    const effectiveImageUrl = imageUrl || (effectiveImageKey ? makePublicImageUrl(req, effectiveImageKey) : "");
+
     const startedAt = Date.now();
     const started = await startCozeBot({
       studentId,
       message,
       conversationId,
-      imageUrl
+      messageImageUrl: imageUrl,
+      flowImageUrl: effectiveImageUrl
     });
 
     await saveStudentContext(studentId, {
       conversationId: started.conversationId,
       lastChatId: started.chatId,
-      lastImageKey: imageKey || savedContext?.lastImageKey || "",
+      lastImageKey: effectiveImageKey,
       lastImageName: imageName || savedContext?.lastImageName || ""
     });
 
@@ -330,7 +356,9 @@ const chatStartHandler = async (req, res) => {
       message,
       imageKey,
       imageName,
-      imageUrl,
+      imageUrl: effectiveImageUrl,
+      flowImageParam: FLOW_IMAGE_PARAM,
+      flowTextParam: FLOW_TEXT_PARAM,
       assistantMessage: "",
       level: "",
       usage: null,
@@ -511,10 +539,10 @@ const exportHandler = async (req, res) => {
   try {
     const logs = await getLogs("");
     const rows = [
-      ["timestamp","completedAt","durationMs","status","experimentRunId","studentId","botId","conversationId","chatId","cozeLogId","level","message","imageName","imageKey","imageUrl","assistantMessage","error"],
+      ["timestamp","completedAt","durationMs","status","experimentRunId","studentId","botId","conversationId","chatId","cozeLogId","level","message","imageName","imageKey","imageUrl","flowImageParam","flowTextParam","assistantMessage","error"],
       ...logs.map(x => [
         x.timestamp,x.completedAt,x.durationMs,x.status,x.experimentRunId,x.studentId,x.botId,x.conversationId,x.chatId,x.cozeLogId,x.level,
-        x.message,x.imageName,x.imageKey,x.imageUrl,x.assistantMessage,x.error
+        x.message,x.imageName,x.imageKey,x.imageUrl,x.flowImageParam,x.flowTextParam,x.assistantMessage,x.error
       ])
     ];
     const csv = "\uFEFF" + rows.map(r => r.map(csvCell).join(",")).join("\n");
@@ -531,10 +559,12 @@ app.get(["/health", "/api/health"], (req, res) => {
   res.json({
     ok: true,
     service: "ai-dynamic-scaffold",
-    cozeMode: "bot-file-url-async",
+    cozeMode: "bot-conversation-flow-parameters-async",
     botConfigured: Boolean(BOT_ID),
     tokenConfigured: Boolean(TOKEN),
     asyncPolling: true,
+    flowImageParam: FLOW_IMAGE_PARAM,
+    flowTextParam: FLOW_TEXT_PARAM || null,
     experimentRunId: RUN_ID
   });
 });
